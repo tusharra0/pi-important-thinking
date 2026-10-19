@@ -1,0 +1,24 @@
+{
+  "name": "pi-important-thinking",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "description": "A small Pi extension that shows only important model thinking.",
+  "keywords": ["pi-package", "pi", "thinking"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tusharra0/pi-important-thinking.git"
+  },
+  "pi": {
+    "extensions": ["./.pi/extensions/important-thinking/index.js"]
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.3.0"
+  }
+}
