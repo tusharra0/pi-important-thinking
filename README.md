@@ -25,7 +25,7 @@ Run one of these commands inside Pi:
 | `/thinking-view full` | Original, unfiltered thinking. |
 | `/thinking-view off` | Hide thinking text and collapsed labels. |
 
-Changes apply immediately. Run `/thinking-view` to check the mode. The mode resets to `balanced` when the extension reloads or the session changes.
+Changes apply immediately and are remembered across sessions, reloads, and restarts in `~/.pi/agent/important-thinking.json` (or under `PI_CODING_AGENT_DIR`). Run `/thinking-view` to check the current mode.
 
 If thinking is collapsed, press **Ctrl+T** to expand it. The filter uses English keywords and can miss useful content; `full` lets you inspect everything. Long excerpts end in an ellipsis.
 

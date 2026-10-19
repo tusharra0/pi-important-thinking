@@ -3,9 +3,23 @@
  *
  * A display-only filter for assistant thinking blocks. The original message is
  * left untouched, so the model and the session still retain the full content.
+ * The chosen view mode is remembered in Pi's agent directory.
  */
 
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+
 const MODES = new Set(["balanced", "strict", "full", "off"]);
+const DEFAULT_MODE = "balanced";
+const PREFERENCE_FILE = "important-thinking.json";
+
+const MODE_DESCRIPTIONS = {
+  balanced: "showing decisions, findings, risks, and next steps",
+  strict: "showing only high-signal findings and problems",
+  full: "showing unfiltered thinking in expanded blocks",
+  off: "hiding thinking text",
+};
 
 const MODE_SETTINGS = {
   balanced: { threshold: 3, maxItems: 5 },
@@ -16,7 +30,7 @@ const SIGNALS = [
   {
     weight: 6,
     pattern:
-      /\b(errors?|fail(?:s|ed|ures?)?|block(?:ed|ers?)?|risks?|warnings?|unsafe|security|destructive|conflicts?|invalid|regressions?|bugs?|cannot|can't|unable|missing)\b/i,
+      /\b(errors?|fail(?:s|ed|ures?)?|block(?:ed|ers?)?|risks?|warnings?|unsafe|security|destructive|conflicts?|invalid|regressions?|bugs?|cannot|can[’']t|unable|missing)\b/i,
   },
   {
     weight: 5,
@@ -80,9 +94,11 @@ function splitThinking(markdown, isStreaming) {
   let paragraph = "";
 
   const flush = (complete) => {
-    // Skip sentence boundaries inside inline code, including multiple backticks.
+    // Skip sentence boundaries inside inline code (including multiple
+    // backticks), after common abbreviations, and before lowercase text.
     let start = 0;
-    const tokens = /(`+)[\s\S]*?\1(?!`)|[.!?]["'’”)*_`]*\s+/g;
+    const tokens =
+      /(`+)[\s\S]*?\1(?!`)|(?<!\b(?:[Ee]\.g|[Ii]\.e|etc|vs|cf|approx|Mr|Mrs|Ms|Dr|Fig|al))[.!?]["'’”)*_`]*\s+(?![\s\p{Ll}])/gu;
     for (const match of paragraph.matchAll(tokens)) {
       if (match[1]) continue;
       const end = match.index + match[0].length;
@@ -123,9 +139,12 @@ function splitThinking(markdown, isStreaming) {
       flush(true);
       continue;
     }
-    // Keep soft-wrapped prose together so qualifying clauses are not lost.
-    if (context.listIndent || /^\s*#{1,6}\s+/.test(context.body)) flush(true);
+    // Keep soft-wrapped prose together so qualifying clauses are not lost,
+    // but list items and headings always start a new block.
+    const heading = /^\s*#{1,6}\s+/.test(context.body);
+    if (context.listIndent || heading) flush(true);
     paragraph += `${paragraph ? " " : ""}${context.body.trim()}`;
+    if (heading) flush(true);
   }
   flush(!isStreaming);
   return pieces.filter(Boolean);
@@ -173,6 +192,32 @@ export function filterThinking(markdown, mode = "balanced", { isStreaming = fals
   return important.map((item) => `- ${shorten(item.text)}`).join("\n");
 }
 
+export function preferencePath() {
+  return join(getAgentDir(), PREFERENCE_FILE);
+}
+
+function loadMode() {
+  try {
+    const { mode } = JSON.parse(readFileSync(preferencePath(), "utf8"));
+    return MODES.has(mode) ? mode : DEFAULT_MODE;
+  } catch {
+    return DEFAULT_MODE;
+  }
+}
+
+function saveMode(mode) {
+  try {
+    const path = preferencePath();
+    mkdirSync(dirname(path), { recursive: true });
+    const temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify({ mode }, null, 2)}\n`);
+    renameSync(temporary, path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function usage() {
   return "Usage: /thinking-view balanced | strict | full | off";
 }
@@ -185,7 +230,7 @@ export default function importantThinking(pi) {
     );
   }
 
-  let mode = "balanced";
+  let mode = loadMode();
 
   const refresh = (ctx) => {
     if (ctx.mode !== "tui") return;
@@ -221,14 +266,13 @@ export default function importantThinking(pi) {
       }
 
       mode = requested;
-      const descriptions = {
-        balanced: "showing decisions, findings, risks, and next steps",
-        strict: "showing only high-signal findings and problems",
-        full: "showing unfiltered thinking in expanded blocks",
-        off: "hiding thinking text",
-      };
       refresh(ctx);
-      ctx.ui.notify(`Thinking view: ${mode} — ${descriptions[mode]}.`, "info");
+      const saved = saveMode(mode);
+      ctx.ui.notify(
+        `Thinking view: ${mode} — ${MODE_DESCRIPTIONS[mode]}.` +
+          (saved ? "" : ` Could not save this preference to ${preferencePath()}; it applies to this session only.`),
+        saved ? "info" : "warning",
+      );
     },
   });
 

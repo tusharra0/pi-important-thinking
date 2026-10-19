@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { AssistantMessageComponent, InteractiveMode, getMarkdownTheme, initTheme } from "@earendil-works/pi-coding-agent";
@@ -10,6 +13,8 @@ const extensionPath = fileURLToPath(new URL("../.pi/extensions/important-thinkin
 initTheme("dark", false);
 
 async function harness() {
+  // Each harness gets its own agent directory so saved modes never leak between tests.
+  process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "important-thinking-"));
   const loaded = await loadExtensions([extensionPath], process.cwd());
   assert.deepEqual(loaded.errors, []);
   assert.equal(loaded.extensions.length, 1);

@@ -1,11 +1,54 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   default as importantThinking,
   filterThinking,
+  preferencePath,
   scoreThinkingSegment,
 } from "../.pi/extensions/important-thinking/index.js";
+
+// Keep every test away from the real ~/.pi/agent directory.
+const freshAgentDir = () => (process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "important-thinking-")));
+freshAgentDir();
+
+function fakePi() {
+  const registered = { events: new Map() };
+  const pi = {
+    registerMarkdownTransformer(transformer) {
+      registered.transformer = transformer;
+    },
+    registerCommand(name, command) {
+      registered.command = { name, ...command };
+    },
+    on(name, handler) {
+      registered.events.set(name, handler);
+    },
+  };
+  importantThinking(pi);
+  return registered;
+}
+
+function fakeContext(mode = "tui") {
+  const statuses = [];
+  const notifications = [];
+  const ctx = {
+    mode,
+    ui: {
+      setStatus(key, value) {
+        statuses.push([key, value]);
+      },
+      notify(message, type) {
+        notifications.push([message, type]);
+      },
+      setHiddenThinkingLabel() {},
+    },
+  };
+  return { ctx, statuses, notifications };
+}
 
 test("balanced mode removes routine narration", () => {
   const input = [
@@ -55,40 +98,14 @@ test("duplicate important items are collapsed", () => {
 });
 
 test("extension registers its transformer, command, and lifecycle hooks", async () => {
-  const registered = { events: new Map() };
-  const pi = {
-    registerMarkdownTransformer(transformer) {
-      registered.transformer = transformer;
-    },
-    registerCommand(name, command) {
-      registered.command = { name, ...command };
-    },
-    on(name, handler) {
-      registered.events.set(name, handler);
-    },
-  };
-
-  importantThinking(pi);
+  freshAgentDir();
+  const registered = fakePi();
 
   assert.equal(registered.command.name, "thinking-view");
   assert.equal(typeof registered.transformer, "function");
   assert.deepEqual([...registered.events.keys()], ["session_start", "session_shutdown"]);
 
-  const statuses = [];
-  const notifications = [];
-  const ctx = {
-    mode: "tui",
-    ui: {
-      setStatus(key, value) {
-        statuses.push([key, value]);
-      },
-      notify(message, type) {
-        notifications.push([message, type]);
-      },
-      setHiddenThinkingLabel() {},
-    },
-  };
-
+  const { ctx, statuses, notifications } = fakeContext();
   await registered.command.handler("strict", ctx);
   assert.deepEqual(statuses.at(-1), ["important-thinking", "thinking view: strict"]);
   assert.match(notifications.at(-1)[0], /Thinking view: strict/);
@@ -223,4 +240,78 @@ test("long excerpts remain bounded without splitting a surrogate pair", () => {
 
 test("older Pi APIs produce an actionable compatibility error", () => {
   assert.throws(() => importantThinking({}), /requires Pi's registerMarkdownTransformer API/);
+});
+
+test("headings are separate excerpts and do not absorb the next sentence", () => {
+  const input = "## Root cause\nThe parser fails on empty input.\n# Plan\n# Risks\nThe migration is destructive.";
+  const result = filterThinking(input);
+  assert.match(result, /^- The parser fails on empty input\.$/m);
+  assert.match(result, /^- The migration is destructive\.$/m);
+  assert.doesNotMatch(result, /Root cause The parser|Risks The migration/);
+});
+
+test("abbreviations and lowercase continuations do not split sentences", () => {
+  const cases = [
+    "The fix is e.g. a null check, otherwise tests fail.",
+    "Compare this vs. the old parser, which fails on empty input.",
+    "This takes approx. 5 retries before the request fails.",
+    "See the docs (i.e. the README) because the build fails.",
+  ];
+  for (const input of cases) assert.equal(filterThinking(input), `- ${input}`, input);
+  assert.equal(filterThinking("The parser fails.  the second sentence is a bug."), "- The parser fails.  the second sentence is a bug.".replace(/\s+/g, " "));
+  assert.deepEqual(filterThinking("Tests fail. The root cause is a missing file.").split("\n"), [
+    "- Tests fail.",
+    "- The root cause is a missing file.",
+  ]);
+});
+
+test("curly apostrophes match negation signals", () => {
+  assert.equal(scoreThinkingSegment("We can’t ship this."), scoreThinkingSegment("We can't ship this."));
+  assert.match(filterThinking("We can’t ship this.", "strict"), /can’t ship/);
+});
+
+test("the chosen mode is saved and restored across extension loads", async () => {
+  const dir = freshAgentDir();
+  const first = fakePi();
+  const { ctx, notifications } = fakeContext();
+  await first.command.handler("strict", ctx);
+  assert.equal(notifications.at(-1)[1], "info");
+  assert.equal(preferencePath(), join(dir, "important-thinking.json"));
+  assert.deepEqual(JSON.parse(readFileSync(preferencePath(), "utf8")), { mode: "strict" });
+
+  const second = fakePi();
+  const routine = "The next step is to update the README.";
+  assert.equal(second.transformer(routine, { messageType: "assistant-thinking" }), "");
+  assert.equal(filterThinking(routine, "balanced"), `- ${routine}`);
+
+  await second.command.handler("off", ctx);
+  assert.equal(fakePi().transformer("Tests fail.", { messageType: "assistant-thinking" }), "");
+  await second.command.handler("balanced", ctx);
+  assert.equal(fakePi().transformer("Tests fail.", { messageType: "assistant-thinking" }), "- Tests fail.");
+});
+
+test("corrupt or unknown saved preferences fall back to balanced", () => {
+  const routine = "The next step is to update the README.";
+  for (const contents of ["{not json", '{"mode":"verbose"}', '{"mode":5}', "[]", ""]) {
+    freshAgentDir();
+    writeFileSync(preferencePath(), contents);
+    assert.equal(fakePi().transformer(routine, { messageType: "assistant-thinking" }), `- ${routine}`, contents);
+  }
+});
+
+test("a mode change still applies when the preference cannot be saved", async () => {
+  const dir = freshAgentDir();
+  // Point the agent directory at a regular file so the directory cannot be created.
+  const blocker = join(dir, "blocker");
+  writeFileSync(blocker, "");
+  process.env.PI_CODING_AGENT_DIR = blocker;
+
+  const registered = fakePi();
+  const { ctx, notifications } = fakeContext();
+  await registered.command.handler("strict", ctx);
+  assert.equal(notifications.at(-1)[1], "warning");
+  assert.match(notifications.at(-1)[0], /Thinking view: strict/);
+  assert.match(notifications.at(-1)[0], /Could not save/);
+  assert.equal(registered.transformer("The next step is to update the README.", { messageType: "assistant-thinking" }), "");
+  freshAgentDir();
 });
